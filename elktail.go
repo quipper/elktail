@@ -18,6 +18,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sort"
 	"time"
 )
 
@@ -40,6 +41,23 @@ type displayedEntry struct {
 
 func (entry *displayedEntry) isBefore(timeStamp string) bool {
 	return entry.timeStamp < timeStamp
+}
+
+type entrySlice struct {
+	entries        []map[string]interface{}
+	timestampField string
+}
+
+func (e entrySlice) Len() int {
+	return len(e.entries)
+}
+
+func (e entrySlice) Swap(i, j int) {
+	e.entries[i], e.entries[j] = e.entries[j], e.entries[i]
+}
+
+func (e entrySlice) Less(i, j int) bool {
+	return fmt.Sprintf("%v", e.entries[i][e.timestampField]) < fmt.Sprintf("%v", e.entries[j][e.timestampField])
 }
 
 // Regexp for parsing out format fields
@@ -201,27 +219,37 @@ func (tail *Tail) processResults(searchResult *elastic.SearchResult) {
 	// equal to last timestamp minus tailing time window. Since we are tracking IDs of entries form previous query,
 	// we can use the IDs to remove the duplicates. https://github.com/knes1/elktail/issues/11
 
+	slice := &entrySlice{
+		make([]map[string]interface{}, 0, len(hits)),
+		tail.queryDefinition.TimestampField,
+	}
 	if tail.order {
 		for i := 0; i < len(hits); i++ {
 			hit := hits[i]
 			entry := tail.processHit(hit)
+			slice.entries = append(slice.entries, entry)
 			timeStamp := entry[tail.queryDefinition.TimestampField].(string)
 			if timeStamp != tail.lastTimeStamp {
 				tail.lastTimeStamp = timeStamp
 			}
 			tail.lastIDs = append(tail.lastIDs, displayedEntry{timeStamp: timeStamp, id: hit.Id})
 		}
-
+		sort.Sort(sort.Reverse(slice))
 	} else { //when results are in descending order, we need to process them in reverse
 		for i := len(hits) - 1; i >= 0; i-- {
 			hit := hits[i]
 			entry := tail.processHit(hit)
+			slice.entries = append(slice.entries, entry)
 			timeStamp := entry[tail.queryDefinition.TimestampField].(string)
 			if timeStamp != tail.lastTimeStamp {
 				tail.lastTimeStamp = timeStamp
 			}
 			tail.lastIDs = append(tail.lastIDs, displayedEntry{timeStamp: timeStamp, id: hit.Id})
 		}
+		sort.Sort(slice)
+	}
+	for _, e := range slice.entries {
+		tail.printResult(e)
 	}
 	cutoffTime := formatElasticTimeStamp(parseElasticTimeStamp(tail.lastTimeStamp).Add(-tailingTimeWindow * time.Millisecond))
 	drainOldEntries(&tail.lastIDs, cutoffTime)
@@ -253,7 +281,6 @@ func (tail *Tail) processHit(hit *elastic.SearchHit) map[string]interface{} {
 	if err != nil {
 		Error.Fatalln("Failed parsing ElasticSearch response.", err)
 	}
-	tail.printResult(entry)
 	return entry
 }
 
